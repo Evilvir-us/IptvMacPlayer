@@ -1,6 +1,9 @@
 # IptvMacPlayer
 Iptv Mac Player for Windows
 
+## Requirement
+[VLC Media Player](https://www.videolan.org/vlc/download-windows.html) must be installed
+
 ## Windows
 Download the exe from the [releases page](https://github.com/Evilvir-us/IptvMacPlayer/releases)
 
