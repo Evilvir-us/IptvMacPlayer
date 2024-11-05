@@ -954,7 +954,7 @@ class MainWindow(QMainWindow):
 
 
     def launch_media_player(self, stream_url):
-          vlc_path = ""
+        vlc_path = ""
         try:
             vlc_path = subprocess.check_output('where vlc', shell=True).decode().strip()
             media_player = f"{vlc_path}"
