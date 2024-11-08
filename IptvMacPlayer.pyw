@@ -1,37 +1,20 @@
 import os
+import json
+import threading
 import sys
+import vlc
 import base64
-from PyQt5.QtCore import QByteArray, QBuffer
-from PyQt5.QtGui import QPixmap, QIcon
-from PyQt5.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QLineEdit, QLabel, QPushButton, QWidget, QTabWidget
+from PyQt5.QtCore import QByteArray, QBuffer, Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QPixmap, QIcon, QPalette, QColor, QStandardItemModel, QStandardItem
+from PyQt5.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QLineEdit, QLabel, QPushButton, QWidget, QTabWidget, QMessageBox, QListView, QHBoxLayout, QAbstractItemView, QProgressBar
 import requests
 import subprocess
 import logging
-from PyQt5.QtCore import (
-    QSettings,
-    Qt,
-    QThread,
-    pyqtSignal,
-    QPropertyAnimation,
-    QEasingCurve,  # Import QEasingCurve directly
-)
-from PyQt5.QtWidgets import (
-    QMessageBox,
-    QLabel,
-    QMainWindow,
-    QApplication,
-    QListView,
-    QVBoxLayout,
-    QWidget,
-    QLineEdit,
-    QHBoxLayout,
-    QPushButton,
-    QAbstractItemView,
-    QTabWidget,
-    QProgressBar,
-)
-from PyQt5.QtGui import QStandardItemModel, QStandardItem
+import time
 from urllib.parse import quote, urlparse, urlunparse
+
+# Configure the logging module
+logging.basicConfig(level=logging.INFO)  # Set to DEBUG for detailed logs
 
 # Configure the logging module
 logging.basicConfig(level=logging.INFO)  # Set to DEBUG for detailed logs
@@ -71,67 +54,74 @@ class RequestThread(QThread):
 
     def run(self):
         try:
+            # Check if thread was interrupted at the start
+            if self.isInterruptionRequested():
+                logging.debug("RequestThread was interrupted at the start.")
+                self.request_complete.emit({})
+                return
+
             logging.debug("RequestThread started.")
             session = requests.Session()
-            url = self.base_url
-            mac_address = self.mac_address
-            token = get_token(session, url, mac_address)
+            token = self.get_token(session, self.base_url, self.mac_address)
+
             if token:
                 if self.category_type and self.category_id:
-                    # Fetch channels in a category
                     self.update_progress.emit(10)  # Token retrieval complete
-                    logging.debug("Fetching channels.")
                     channels = self.get_channels(
-                        session,
-                        url,
-                        mac_address,
-                        token,
-                        self.category_type,
-                        self.category_id,
+                        session, self.base_url, self.mac_address, token, self.category_type, self.category_id
                     )
                     self.update_progress.emit(100)
                     self.channels_loaded.emit(channels)
                 else:
-                    # Fetch playlist (Live, Movies, Series)
-                    data = {
-                        "Live": [],
-                        "Movies": [],
-                        "Series": [],
-                    }
-
-                    # Retrieve IPTV genres for Live tab
-                    self.update_progress.emit(10)
-                    logging.debug("Fetching genres for Live tab.")
-                    genres = self.get_genres(session, url, mac_address, token)
-                    if genres:
-                        data["Live"].extend(genres)
-
-                    self.update_progress.emit(40)  # Update progress after genres
-                    logging.debug("Fetching VOD categories for Movies tab.")
-                    # Retrieve VOD categories for Movies tab
-                    vod_categories = self.get_vod_categories(session, url, mac_address, token)
-                    if vod_categories:
-                        data["Movies"].extend(vod_categories)
-
-                    self.update_progress.emit(70)  # Update progress after VOD categories
-                    logging.debug("Fetching Series categories for Series tab.")
-                    # Retrieve Series categories for Series tab
-                    series_categories = self.get_series_categories(session, url, mac_address, token)
-                    if series_categories:
-                        data["Series"].extend(series_categories)
-
-                    self.update_progress.emit(100)  # Update progress to complete
-                    self.request_complete.emit(data)
+                    # Fetch and emit playlist data as before
+                    self.fetch_and_emit_playlist_data(session, token)
             else:
-                self.request_complete.emit({})
-                self.update_progress.emit(0)  # Reset progress if token fails
+                self.request_complete.emit({})  # Emit empty data if token fails
+                self.update_progress.emit(0)
 
         except Exception as e:
             logging.error(f"Request thread error: {str(e)}")
-            traceback.print_exc()
-            self.request_complete.emit({})  # Emit empty data in case of an error
-            self.update_progress.emit(0)  # Reset progress on error
-            
+            self.request_complete.emit({})
+            self.update_progress.emit(0)
+
+    def requestInterruption(self):
+        # This is how you request interruption in QThread.
+        super().requestInterruption()
+
+    def fetch_and_emit_playlist_data(self, session, token):
+        # Simulating the playlist fetching process
+        data = {"Live": [], "Movies": [], "Series": []}
+
+        # Fetching genres for Live tab
+        self.update_progress.emit(10)
+        genres = self.get_genres(session, self.base_url, self.mac_address, token)
+        if genres:
+            data["Live"].extend(genres)
+
+        # Update progress after fetching genres
+        self.update_progress.emit(40)
+
+        # Fetching VOD categories for Movies tab
+        vod_categories = self.get_vod_categories(session, self.base_url, self.mac_address, token)
+        if vod_categories:
+            data["Movies"].extend(vod_categories)
+
+        # Update progress after fetching VOD categories
+        self.update_progress.emit(70)
+
+        # Fetching Series categories for Series tab
+        series_categories = self.get_series_categories(session, self.base_url, self.mac_address, token)
+        if series_categories:
+            data["Series"].extend(series_categories)
+
+        # Final progress update
+        self.update_progress.emit(100)
+        # Emit the complete data through the signal
+        self.request_complete.emit(data)
+
+    def get_token(self, session, url, mac_address):
+        # Placeholder for the token fetching logic
+        return "sample_token"  # Replace with actual logic to fetch token
 
     def get_genres(self, session, url, mac_address, token):
         try:
@@ -283,45 +273,113 @@ class RequestThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("IPTV Mac Player")
-        self.setGeometry(100, 100, 510, 550)  # Increased window height for the progress bar
 
-        # Set the Fusion theme
-        QApplication.setStyle("Fusion")  # Correctly set the application style
-        
+        # Get the user's home directory and create the Evilvir.us directory if it doesn't exist
+        self.user_folder = os.path.expanduser("~")
+        self.evilvir_folder = os.path.join(self.user_folder, "Evilvir.us")
+        os.makedirs(self.evilvir_folder, exist_ok=True)  # Ensure the folder exists
+
+        # Set the path for the settings file
+        self.settings_file = os.path.join(self.evilvir_folder, "iptv_player_settings.json")
+
+        # Initialize current_request_thread to None
+        self.current_request_thread = None  # Ensure it's defined
+
+        self.setWindowTitle("IPTV Mac Player by Evilvir.us")
+        self.setGeometry(100, 100, 1100, 449)  # Initial size
+
+        # Initialize VLC instance
+        self.instance = vlc.Instance('--no-xlib', '--vout=directx')  # Windows
+        self.videoPlayer = self.instance.media_player_new()
+
+        # Set the Fusion theme with dark mode
+        QApplication.setStyle("Fusion")
+
+        # Set dark style for the whole application
+        dark_stylesheet = """
+        QWidget {
+            background-color: #2e2e2e;
+            color: white;
+            font-size: 10pt;
+        }
+        QLineEdit, QPushButton, QTabWidget, QProgressBar {
+            background-color: #444444;
+            color: white;
+            border: 1px solid #666666;
+            padding: 5px;
+        }
+        QLineEdit:focus, QPushButton:pressed {
+            background-color: #666666;
+        }
+        QTabWidget::pane {
+            border: 1px solid #444444;
+            background-color: #333333;
+        }
+        QTabBar::tab {
+            background-color: #444444;
+            color: white;
+            padding: 5px;
+        }
+        QTabBar::tab:selected {
+            background-color: #666666;
+        }
+        QProgressBar {
+            text-align: center;
+            color: white;
+            border-radius: 5px;
+            background-color: #555555;
+        }
+        QProgressBar::chunk {
+            background-color: #1e90ff;
+        }
+        """
+        self.setStyleSheet(dark_stylesheet)
+
         # Set the base64 image as the window icon
         self.set_window_icon()
 
-        self.settings = QSettings("MyCompany", "IPTVPlayer")
-
+        # Central widget
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
 
-        layout = QVBoxLayout(central_widget)
+        # Main layout to hold both left content and VLC frame
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        main_layout.setSpacing(0)  # Remove spacing between widgets
 
-        top_layout = QVBoxLayout()
-        layout.addLayout(top_layout)
+        # Left layout for all other widgets
+        self.left_layout = QVBoxLayout()  # Define left_layout as an instance variable
+        self.left_layout.setContentsMargins(10, 0, 10, 10)
+        self.left_layout.setSpacing(0)  # Remove spacing between widgets
 
-        hostname_label = QLabel("Hostname:")
-        top_layout.addWidget(hostname_label)
+        self.left_layout.addSpacing(5)  # Adds space
 
+        # Hostname label and input horizontally aligned
+        self.hostname_layout = QHBoxLayout()  # Create a horizontal layout
+        self.hostname_label = QLabel("Host:")
+        self.hostname_layout.addWidget(self.hostname_label)  # Add label to the layout
         self.hostname_input = QLineEdit()
-        top_layout.addWidget(self.hostname_input)
-
-        mac_label = QLabel("MAC:")
-        top_layout.addWidget(mac_label)
-
+        self.hostname_layout.addWidget(self.hostname_input)  # Add input box to the layout
+        self.left_layout.addLayout(self.hostname_layout)  # Add the horizontal layout to the left layout
+        self.left_layout.addSpacing(2)  # Adds space
+        # MAC label and input horizontally aligned
+        self.mac_layout = QHBoxLayout()  # Create a horizontal layout for MAC
+        self.mac_label = QLabel("MAC:")
+        self.mac_layout.addWidget(self.mac_label)  # Add label to the layout
         self.mac_input = QLineEdit()
-        top_layout.addWidget(self.mac_input)
+        self.mac_layout.addWidget(self.mac_input)  # Add input box to the layout
+        self.left_layout.addLayout(self.mac_layout)  # Add the horizontal layout to the left layout
 
+
+        self.left_layout.addSpacing(5)  # Adds space
 
         self.get_playlist_button = QPushButton("Get Playlist")
-        layout.addWidget(self.get_playlist_button)
+        self.left_layout.addWidget(self.get_playlist_button)
         self.get_playlist_button.clicked.connect(self.get_playlist)
-
+        self.left_layout.addSpacing(5)  # Adds space
         # Create a QTabWidget
         self.tab_widget = QTabWidget()
-        layout.addWidget(self.tab_widget)
+        self.left_layout.addWidget(self.tab_widget)
 
         # Dictionary to hold tab data
         self.tabs = {}
@@ -333,20 +391,16 @@ class MainWindow(QMainWindow):
             playlist_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
             tab_layout.addWidget(playlist_view)
 
-            playlist_model = QStandardItemModel(playlist_view)
-            playlist_view.setModel(playlist_model)
+            self.playlist_model = QStandardItemModel(playlist_view)
+            playlist_view.setModel(self.playlist_model)
 
-            # Connect double-click signal
             playlist_view.doubleClicked.connect(self.on_playlist_selection_changed)
-
-            # Add the tab to the tab widget
             self.tab_widget.addTab(tab, tab_name)
 
-            # Store tab data
             self.tabs[tab_name] = {
                 "tab_widget": tab,
                 "playlist_view": playlist_view,
-                "playlist_model": playlist_model,
+                "self.playlist_model": self.playlist_model,
                 "current_category": None,
                 "navigation_stack": [],
                 "playlist_data": [],
@@ -355,47 +409,149 @@ class MainWindow(QMainWindow):
                 "current_view": "categories",
             }
 
-        # Create a purple progress bar at the bottom
+        # Progress bar at the bottom
         self.progress_bar = QProgressBar()
         self.progress_bar.setStyleSheet(
             """
             QProgressBar {
-                text-align: center;  /* Center the text */
-                color: white;  /* Set the text color to white */
+                text-align: center;
+                color: white;
             }
             QProgressBar::chunk {
-                background-color: purple;  /* Set the progress bar chunk color */
+                background-color: #1e90ff;
             }
             """
         )
         self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        self.left_layout.addWidget(self.progress_bar)
 
-        # Initialize QPropertyAnimation for the progress bar
+        # Add the left layout to the main layout
+        main_layout.addLayout(self.left_layout)
+
+        # Right frame for VLC media window
+        self.video_frame = QWidget(self)  # Changed from QFrame to QWidget for direct size management
+        self.video_frame.setStyleSheet("background-color: black;")  # Ensure black background for video area
+        self.video_frame.setMinimumWidth(800)  # Adjust the width as needed
+        main_layout.addWidget(self.video_frame)
+
+        if sys.platform.startswith('linux'):  # for Linux using the X Server
+            self.videoPlayer.set_xwindow(self.video_frame.winId())
+        elif sys.platform == "win32":  # for Windows
+            self.videoPlayer.set_hwnd(self.video_frame.winId())
+        elif sys.platform == "darwin":  # for MacOS
+            self.videoPlayer.set_nsobject(int(self.video_frame.winId()))
+            
+        self.videoPlayer.set_media(self.instance.media_new('https://iptv.evilvir.us/skull.mp4'))  # Load skull
+        self.videoPlayer.play()  # Start playing the video
+
+
+        self.videoPlayer.video_set_mouse_input(False)
+        self.videoPlayer.video_set_key_input(False)
+
+        # Create and initialize the progress animation
         self.progress_animation = QPropertyAnimation(self.progress_bar, b"value")
-        self.progress_animation.setDuration(500)  # Duration in milliseconds
-        self.progress_animation.setEasingCurve(QEasingCurve.InOutQuad)  # Smooth curve
-
-        # Connect the update_progress signal to the set_progress slot
-        self.current_request_thread = None  # To keep track of the current thread
-
+        self.progress_animation.setDuration(1000)  # Duration of the animation (in milliseconds)
+        self.progress_animation.setEasingCurve(QEasingCurve.Linear)  # Smooth progress change
+        
         # Load settings
-        self.load_settings()
+        self.load_settings_json()
+        
+    def load_settings_json(self):
+        #Set Default Values
+        self.hostname_input.setText(f"http://iptv.server.com/c/")
+        self.mac_input.setText(f"00:1A:79:12:34:56")
+        if os.path.exists(self.settings_file):
+            with open(self.settings_file, "r") as f:
+                
+                settings = json.load(f)
+                # Set text inputs from loaded settings
+                self.hostname_input.setText(settings.get("hostname", ""))
+                self.mac_input.setText(settings.get("mac_address", ""))
+  
 
-    def load_settings(self):
-        self.hostname_input.setText(self.settings.value("hostname", ""))
-        self.mac_input.setText(self.settings.value("mac_address", ""))
-       
+                    
+                    
+    def save_settings_json(self):
+        settings = {
+            "hostname": self.hostname_input.text(),
+            "mac_address": self.mac_input.text()
+        }
+        with open(self.settings_file, "w") as f:
+            json.dump(settings, f)
 
     def closeEvent(self, event):
-        self.save_settings()
-        event.accept()
+        self.save_settings_json()
+        event.accept()     
 
-    def save_settings(self):
-        self.settings.setValue("hostname", self.hostname_input.text())
-        self.settings.setValue("mac_address", self.mac_input.text())
-        
+    def set_progress(self, value):
+        # Ensure the animation only runs if it's not already running
+        if self.progress_animation.state() != QPropertyAnimation.Running:
+            self.progress_animation.setStartValue(self.progress_bar.value())
+            self.progress_animation.setEndValue(value)
+            self.progress_animation.start()
+            
+            
+    def mousePressEvent(self, event):
+        # This method is triggered on mouse click
+        if event.button() == Qt.LeftButton:  # Only respond to left-clicks
+            if self.videoPlayer.is_playing():  # Check if the video is currently playing
+                self.videoPlayer.pause()  # Pause the video
+            else:
+                self.videoPlayer.play()  # Play the video
+                
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.windowState() == Qt.WindowNoState:
+                # Hide all widgets in left_layout, including hostname and MAC inputs
+                for i in range(self.left_layout.count()):
+                    widget = self.left_layout.itemAt(i).widget()
+                    if widget:
+                        widget.hide()
+                # Hide all widgets in hostname_layout
+                for i in range(self.hostname_layout.count()):
+                    widget = self.hostname_layout.itemAt(i).widget()
+                    if widget:
+                        widget.hide()
+                # Hide all widgets in mac_layout
+                for i in range(self.mac_layout.count()):
+                    widget = self.mac_layout.itemAt(i).widget()
+                    if widget:
+                        widget.hide()
 
+
+                screen_geometry = QApplication.primaryScreen().geometry()
+                self.showFullScreen()
+                # Move video_frame to top-left corner on double click
+                self.video_frame.move(0, 0)  # Move the video frame to (0, 0) top-left corner
+
+                # Ensure no layout padding or spacing
+                self.left_layout.setContentsMargins(0, 0, 0, 0)  # Remove padding around the left layout
+                self.left_layout.setSpacing(0)  # No space between widgets
+                self.videoPlayer.play()  # Play the video
+
+            else:
+                # Restore window state to normal
+                self.showNormal()  # Restore to normal window state
+
+                # Restore the layout and widgets visibility
+                for i in range(self.left_layout.count()):
+                    widget = self.left_layout.itemAt(i).widget()
+                    if widget:
+                        widget.show()
+                for i in range(self.hostname_layout.count()):
+                    widget = self.hostname_layout.itemAt(i).widget()
+                    if widget:
+                        widget.show()
+                for i in range(self.mac_layout.count()):
+                    widget = self.mac_layout.itemAt(i).widget()
+                    if widget:
+                        widget.show()
+
+                central_width = self.centralWidget().width()
+                self.left_layout.setContentsMargins(10, 0, 10, 10)
+                self.left_layout.setSpacing(5)  # Adjust spacing if necessary
+                self.videoPlayer.play()  # Play the video
+            
     def show_error_message(self, message):
         QMessageBox.critical(self, "Error", message)
     
@@ -417,9 +573,11 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(pixmap))
 
     def get_playlist(self):
+        self.playlist_model.clear()
+        self.videoPlayer.set_media(self.instance.media_new('https://iptv.evilvir.us/skull.mp4'))  # Load skull
+        self.videoPlayer.play()  # Start playing the video
         hostname_input = self.hostname_input.text()
         mac_address = self.mac_input.text()
-        
 
         if not hostname_input or not mac_address:
             QMessageBox.warning(
@@ -441,25 +599,21 @@ class MainWindow(QMainWindow):
         self.base_url = urlunparse((parsed_url.scheme, parsed_url.netloc, "", "", "", ""))
         self.mac_address = mac_address
 
-        # Initialize RequestThread for fetching playlist
+        # Stop the current request thread if one is already running
+        
         if self.current_request_thread is not None and self.current_request_thread.isRunning():
-            QMessageBox.warning(
-                self,
-                "Warning",
-                "A playlist request is already in progress. Please wait.",
-            )
-            logging.warning(
-                "User attempted to start a new playlist request while one is already running."
-            )
-            return
+            logging.info("Stopping current RequestThread to start a new one.")
+            self.current_request_thread.requestInterruption()
+            self.current_request_thread.wait()  # Wait for the thread to finish
 
+        # Initialize a new RequestThread for fetching playlist
         self.request_thread = RequestThread(self.base_url, mac_address)
         self.request_thread.request_complete.connect(self.on_initial_playlist_received)
         self.request_thread.update_progress.connect(self.set_progress)
         self.request_thread.start()
         self.current_request_thread = self.request_thread
-        logging.debug("Started RequestThread for playlist.")
-
+        logging.info("Started new RequestThread for playlist.")
+        
     def set_progress(self, value):
         # Animate the progress bar to the new value
         if self.progress_animation.state() == QPropertyAnimation.Running:
@@ -477,7 +631,7 @@ class MainWindow(QMainWindow):
 
         if not data:
             self.show_error_message(
-                "Failed to retrieve playlist data. Check your connection and try again."
+                "Unable to connect to the host."
             )
             logging.error("Playlist data is empty.")
             self.current_request_thread = None
@@ -496,13 +650,13 @@ class MainWindow(QMainWindow):
 
     def update_playlist_view(self, tab_name):
         tab_info = self.tabs[tab_name]
-        playlist_model = tab_info["playlist_model"]
-        playlist_model.clear()
+        self.playlist_model = tab_info["self.playlist_model"]
+        self.playlist_model.clear()
         tab_info["current_view"] = "categories"
 
         if tab_info["navigation_stack"]:
             go_back_item = QStandardItem("Go Back")
-            playlist_model.appendRow(go_back_item)
+            self.playlist_model.appendRow(go_back_item)
 
         if tab_info["current_category"] is None:
             for item in tab_info["playlist_data"]:
@@ -510,43 +664,49 @@ class MainWindow(QMainWindow):
                 list_item = QStandardItem(name)
                 list_item.setData(item, Qt.UserRole)
                 list_item.setData("category", Qt.UserRole + 1)
-                playlist_model.appendRow(list_item)
+                self.playlist_model.appendRow(list_item)
         else:
             self.retrieve_channels(tab_name, tab_info["current_category"])
 
     def retrieve_channels(self, tab_name, category):
-        tab_info = self.tabs[tab_name]
         category_type = category["category_type"]
         category_id = category.get("category_id") or category.get("genre_id")
+
         try:
-            # Instead of setting progress directly, emit 0
             self.set_progress(0)
+
+            # If a current thread is running, interrupt it and set up to start a new one
             if self.current_request_thread is not None and self.current_request_thread.isRunning():
-                QMessageBox.warning(
-                    self,
-                    "Warning",
-                    "A channel request is already in progress. Please wait.",
-                )
-                logging.warning(
-                    "User attempted to start a new channel request while one is already running."
-                )
-                return  # Prevent starting multiple channel requests
+                logging.info("RequestThread running, stopping it.")
+                self.current_request_thread.requestInterruption()
+                # Connect the finished signal to start a new thread once the old one is done
+                self.current_request_thread.wait()  # Wait for the thread to finish
+                self.current_request_thread.finished.connect(lambda: self.start_new_thread(tab_name, category_type, category_id))
+                return
 
-            self.request_thread = RequestThread(
-                self.base_url, self.mac_address, category_type, category_id
-            )
-            self.request_thread.update_progress.connect(self.set_progress)
-            self.request_thread.channels_loaded.connect(
-                lambda channels: self.on_channels_loaded(tab_name, channels)
-            )
-            self.request_thread.start()
-            self.current_request_thread = self.request_thread
-            logging.debug(f"Started RequestThread for channels in category {category_id}.")
+            # If no thread is running, start a new one directly
+            self.start_new_thread(tab_name, category_type, category_id)
+
         except Exception as e:
-            traceback.print_exc()
-            self.show_error_message("An error occurred while retrieving channels.")
             logging.error(f"Exception in retrieve_channels: {e}")
+            self.show_error_message("An error occurred while retrieving channels.")
 
+    def start_new_thread(self, tab_name, category_type, category_id):
+        self.request_thread = RequestThread(self.base_url, self.mac_address, category_type, category_id)
+        self.request_thread.update_progress.connect(self.set_progress)
+        self.request_thread.channels_loaded.connect(lambda channels: self.on_channels_loaded(tab_name, channels))
+        self.request_thread.start()
+        self.current_request_thread = self.request_thread
+        logging.debug(f"Started RequestThread for channels in category {category_id}.")
+        
+    def check_and_start_new_thread(self, tab_name, category_type, category_id):
+        # Check if the current thread is still running
+        if self.current_request_thread is not None and not self.current_request_thread.isRunning():
+            self.check_thread_timer.stop()  # Stop the timer once the thread has stopped
+            self.start_new_thread(tab_name, category_type, category_id)
+
+       
+        
     def on_channels_loaded(self, tab_name, channels):
         if self.current_request_thread != self.sender():
             logging.debug("Received channels from an old thread. Ignoring.")
@@ -560,13 +720,13 @@ class MainWindow(QMainWindow):
 
     def update_channel_view(self, tab_name):
         tab_info = self.tabs[tab_name]
-        playlist_model = tab_info["playlist_model"]
-        playlist_model.clear()
+        self.playlist_model = tab_info["self.playlist_model"]
+        self.playlist_model.clear()
         tab_info["current_view"] = "channels"
 
         if tab_info["navigation_stack"]:
             go_back_item = QStandardItem("Go Back")
-            playlist_model.appendRow(go_back_item)
+            self.playlist_model.appendRow(go_back_item)
 
         for channel in tab_info["current_channels"]:
             channel_name = channel["name"]
@@ -574,7 +734,7 @@ class MainWindow(QMainWindow):
             list_item.setData(channel, Qt.UserRole)
             item_type = channel.get("item_type", "channel")
             list_item.setData(item_type, Qt.UserRole + 1)
-            playlist_model.appendRow(list_item)
+            self.playlist_model.appendRow(list_item)
 
     def on_playlist_selection_changed(self, index):
         sender = self.sender()
@@ -588,10 +748,10 @@ class MainWindow(QMainWindow):
             return
 
         tab_info = self.tabs[current_tab]
-        playlist_model = tab_info["playlist_model"]
+        self.playlist_model = tab_info["self.playlist_model"]
 
         if index.isValid():
-            item = playlist_model.itemFromIndex(index)
+            item = self.playlist_model.itemFromIndex(index)
             item_text = item.text()
 
             if item_text == "Go Back":
@@ -846,7 +1006,7 @@ class MainWindow(QMainWindow):
                             if cmd_value.startswith("ffmpeg "):
                                 cmd_value = cmd_value[len("ffmpeg ") :]
                             stream_url = cmd_value
-                            self.launch_media_player(stream_url)
+                            self.launch_videoPlayer(stream_url)
                         else:
                             logging.error("Stream URL not found in the response.")
                             QMessageBox.critical(
@@ -863,7 +1023,7 @@ class MainWindow(QMainWindow):
                         self, "Error", f"Error creating stream link: {e}"
                     )
             else:
-                self.launch_media_player(cmd)
+                self.launch_videoPlayer(cmd)
 
         elif item_type in ["episode", "vod"]:
             try:
@@ -905,7 +1065,7 @@ class MainWindow(QMainWindow):
                         if cmd_value.startswith("ffmpeg "):
                             cmd_value = cmd_value[len("ffmpeg ") :]
                         stream_url = cmd_value
-                        self.launch_media_player(stream_url)
+                        self.launch_videoPlayer(stream_url)
                     else:
                         logging.error("Stream URL not found in the response.")
                         QMessageBox.critical(
@@ -929,12 +1089,12 @@ class MainWindow(QMainWindow):
 
     def update_series_view(self, tab_name):
         tab_info = self.tabs[tab_name]
-        playlist_model = tab_info["playlist_model"]
-        playlist_model.clear()
+        self.playlist_model = tab_info["self.playlist_model"]
+        self.playlist_model.clear()
 
         if tab_info["navigation_stack"]:
             go_back_item = QStandardItem("Go Back")
-            playlist_model.appendRow(go_back_item)
+            self.playlist_model.appendRow(go_back_item)
 
         for item in tab_info["current_series_info"]:
             item_type = item.get("item_type")
@@ -947,49 +1107,33 @@ class MainWindow(QMainWindow):
             list_item = QStandardItem(name)
             list_item.setData(item, Qt.UserRole)
             list_item.setData(item_type, Qt.UserRole + 1)
-            playlist_model.appendRow(list_item)
+            self.playlist_model.appendRow(list_item)
 
 
 
 
 
-    def launch_media_player(self, stream_url):
-        vlc_path = ""
-        try:
-            vlc_path = subprocess.check_output('where vlc', shell=True).decode().strip()
-            media_player = f"{vlc_path}"
-        except subprocess.CalledProcessError:
-            pass
-        common_paths = [
-            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"
-        ]
+    def launch_videoPlayer(self, stream_url):
+        logging.debug(f"Launching media player with URL: {stream_url}")
         
-        for path in common_paths:
-            if os.path.exists(path):
-                media_player = f"{path}"
-      
-        if media_player:
-            try:
-                subprocess.Popen([media_player, stream_url])
-                logging.debug(f"Launching media player with URL: {stream_url}")
-            except Exception as e:
-                logging.error(f"Error opening media player: {e}")
-                QMessageBox.critical(
-                    self, "Error", f"Failed to launch media player: {e}"
-                )
-        else:
-            logging.error("Media player executable path not found in settings.")
-            QMessageBox.critical(
-                self,
-                "Error",
-                "Media player executable path not found in settings.",
-            )
+        # Stop the media player if it's already playing
+        if self.videoPlayer.is_playing():
+            self.videoPlayer.stop()
 
-    def resizeEvent(self, event):
-        pass
+        # Clear any previous media
+        self.videoPlayer.set_media(None)
 
+        # Create new media for the new stream URL
+        media = self.instance.media_new(stream_url)
+        self.videoPlayer.set_media(media)
 
+        # Play the new stream
+        self.videoPlayer.play()
+        
+        
+        
+        
+        
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
