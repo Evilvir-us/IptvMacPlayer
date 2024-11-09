@@ -4,7 +4,7 @@ import threading
 import sys
 import vlc
 import base64
-from PyQt5.QtCore import QByteArray, QBuffer, Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QByteArray, QBuffer, Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer
 from PyQt5.QtGui import QPixmap, QIcon, QPalette, QColor, QStandardItemModel, QStandardItem
 from PyQt5.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QLineEdit, QLabel, QPushButton, QWidget, QTabWidget, QMessageBox, QListView, QHBoxLayout, QAbstractItemView, QProgressBar
 import requests
@@ -42,16 +42,24 @@ class RequestThread(QThread):
             session = requests.Session()
             token = self.get_token(session, self.base_url, self.mac_address)
 
+            if self.isInterruptionRequested():
+                logging.debug("RequestThread was interrupted after token retrieval.")
+                self.request_complete.emit({})
+                return
+
             if token:
                 if self.category_type and self.category_id:
                     self.update_progress.emit(10)  # Token retrieval complete
-                    channels = self.get_channels(
-                        session, self.base_url, self.mac_address, token, self.category_type, self.category_id
-                    )
+                    channels = self.get_channels(session, self.base_url, self.mac_address, token, self.category_type, self.category_id)
+                    
+                    if self.isInterruptionRequested():
+                        logging.debug("RequestThread was interrupted while fetching channels.")
+                        self.request_complete.emit({})
+                        return
+                    
                     self.update_progress.emit(100)
                     self.channels_loaded.emit(channels)
                 else:
-                    # Fetch and emit playlist data as before
                     self.fetch_and_emit_playlist_data(session, token)
             else:
                 self.request_complete.emit({})  # Emit empty data if token fails
@@ -61,7 +69,7 @@ class RequestThread(QThread):
             logging.error(f"Request thread error: {str(e)}")
             self.request_complete.emit({})
             self.update_progress.emit(0)
-
+            
     def requestInterruption(self):
         # This is how you request interruption in QThread.
         super().requestInterruption()
@@ -75,6 +83,9 @@ class RequestThread(QThread):
         genres = self.get_genres(session, self.base_url, self.mac_address, token)
         if genres:
             data["Live"].extend(genres)
+        else:
+            self.update_progress.emit(0)
+            return
 
         # Update progress after fetching genres
         self.update_progress.emit(40)
@@ -575,6 +586,11 @@ class MainWindow(QMainWindow):
                 self.left_layout.setSpacing(5)  # Adjust spacing if necessary
                 self.videoPlayer.play()  # Play the video
             
+    def stop_request_thread(self):
+        if self.current_request_thread is not None:
+            self.current_request_thread.requestInterruption()
+            logging.debug("RequestThread interruption requested.")
+
     def show_error_message(self, message):
         QMessageBox.critical(self, "Error", message)
     
@@ -653,6 +669,7 @@ class MainWindow(QMainWindow):
             return  # Ignore signals from older threads
 
         if not data:
+            self.stop_request_thread()
             self.error_label.setText("ERROR: Unable to connect to the host")
             self.error_label.show()  # Show the error label
             logging.info("Playlist data is empty.")
@@ -1129,6 +1146,7 @@ class MainWindow(QMainWindow):
 
 
     def launch_videoPlayer(self, stream_url):
+        self.error_label.hide()
         logging.debug(f"Launching media player with URL: {stream_url}")
         
         # Stop the media player if it's already playing
@@ -1144,9 +1162,19 @@ class MainWindow(QMainWindow):
 
         # Play the new stream
         self.videoPlayer.play()
-        
-        
-        
+
+        # Function to check for errors after a delay
+        def delayed_error_check():
+            if not self.videoPlayer.is_playing():
+                self.on_player_error(None)  # Trigger the error handler manually
+
+        # Use QTimer for delayed error check on the main thread
+        QTimer.singleShot(5000, delayed_error_check)  # 5000 ms = 5 seconds
+
+    def on_player_error(self, event):
+        """Handle VLC errors."""
+        self.error_label.setText("ERROR: Can't load the stream.")
+        self.error_label.show()  # Show the error label        
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
