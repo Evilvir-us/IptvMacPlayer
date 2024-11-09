@@ -14,30 +14,8 @@ import time
 from urllib.parse import quote, urlparse, urlunparse
 
 # Configure the logging module
-logging.basicConfig(level=logging.INFO)  # Set to DEBUG for detailed logs
+logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logs
 
-# Configure the logging module
-logging.basicConfig(level=logging.INFO)  # Set to DEBUG for detailed logs
-
-
-def get_token(session, url, mac_address):
-    try:
-        handshake_url = f"{url}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml"
-        cookies = {"mac": mac_address, "stb_lang": "en", "timezone": "Europe/London"}
-        headers = {"User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)"}
-        response = session.get(handshake_url, cookies=cookies, headers=headers, timeout=10)
-        response.raise_for_status()
-        token = response.json().get("js", {}).get("token")
-        if token:
-            logging.debug(f"Token retrieved: {token}")
-            return token
-        else:
-            logging.error("Token not found in handshake response.")
-            return None
-    except Exception as e:
-        logging.error(f"Error getting token: {e}")
-
-        return None
 
 
 class RequestThread(QThread):
@@ -120,8 +98,23 @@ class RequestThread(QThread):
         self.request_complete.emit(data)
 
     def get_token(self, session, url, mac_address):
-        # Placeholder for the token fetching logic
-        return "sample_token"  # Replace with actual logic to fetch token
+        try:
+            handshake_url = f"{url}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml"
+            cookies = {"mac": mac_address, "stb_lang": "en", "timezone": "Europe/London"}
+            headers = {"User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)"}
+            response = session.get(handshake_url, cookies=cookies, headers=headers, timeout=10)
+            response.raise_for_status()
+            token = response.json().get("js", {}).get("token")
+            if token:
+                logging.debug(f"Token retrieved: {token}")
+                return token
+            else:
+                logging.error("Token not found in handshake response.")
+                return None
+        except Exception as e:
+            logging.error(f"Error getting token: {e}")
+
+            return None
 
     def get_genres(self, session, url, mac_address, token):
         try:
@@ -147,6 +140,7 @@ class RequestThread(QThread):
                 return genres
             else:
                 logging.warning("No genres data found.")
+                self.request_complete.emit({})  # Emit empty data if token fails
                 return []
         except Exception as e:
             logging.error(f"Error getting genres: {e}")
@@ -274,6 +268,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        self.current_request_thread = None  # This ensures the attribute exists
+        
+        self.setWindowTitle("IPTV Mac Player by Evilvir.us")
+        self.setGeometry(100, 100, 1400, 579)  # Initial size
+        
         # Get the user's home directory and create the Evilvir.us directory if it doesn't exist
         self.user_folder = os.path.expanduser("~")
         self.evilvir_folder = os.path.join(self.user_folder, "Evilvir.us")
@@ -281,12 +280,6 @@ class MainWindow(QMainWindow):
 
         # Set the path for the settings file
         self.settings_file = os.path.join(self.evilvir_folder, "iptv_player_settings.json")
-
-        # Initialize current_request_thread to None
-        self.current_request_thread = None  # Ensure it's defined
-
-        self.setWindowTitle("IPTV Mac Player by Evilvir.us")
-        self.setGeometry(100, 100, 1100, 449)  # Initial size
 
         # Initialize VLC instance
         self.instance = vlc.Instance('--no-xlib', '--vout=directx')  # Windows
@@ -361,6 +354,7 @@ class MainWindow(QMainWindow):
         self.hostname_input = QLineEdit()
         self.hostname_layout.addWidget(self.hostname_input)  # Add input box to the layout
         self.left_layout.addLayout(self.hostname_layout)  # Add the horizontal layout to the left layout
+
         self.left_layout.addSpacing(2)  # Adds space
         # MAC label and input horizontally aligned
         self.mac_layout = QHBoxLayout()  # Create a horizontal layout for MAC
@@ -418,12 +412,22 @@ class MainWindow(QMainWindow):
                 color: white;
             }
             QProgressBar::chunk {
-                background-color: #1e90ff;
+                background-color: blue;
             }
             """
         )
         self.progress_bar.setValue(0)
         self.left_layout.addWidget(self.progress_bar)
+
+
+        # Create "ERROR" label and hide it initially
+        self.error_label = QLabel("ERROR: Error message label")
+        self.error_label.setStyleSheet("color: red; font-size: 10pt;")
+        self.left_layout.addWidget(self.error_label, alignment=Qt.AlignRight)
+        self.error_label.hide()  # Initially hide the label
+
+
+
 
         # Add the left layout to the main layout
         main_layout.addLayout(self.left_layout)
@@ -431,7 +435,11 @@ class MainWindow(QMainWindow):
         # Right frame for VLC media window
         self.video_frame = QWidget(self)  # Changed from QFrame to QWidget for direct size management
         self.video_frame.setStyleSheet("background-color: black;")  # Ensure black background for video area
-        self.video_frame.setMinimumWidth(800)  # Adjust the width as needed
+        
+        #VLC dynamic width
+        new_width = self.width() - 360
+        self.video_frame.setMinimumWidth(new_width)
+
         main_layout.addWidget(self.video_frame)
 
         if sys.platform.startswith('linux'):  # for Linux using the X Server
@@ -455,34 +463,49 @@ class MainWindow(QMainWindow):
         
         # Load settings
         self.load_settings_json()
-        
+    
+    def resizeEvent(self, event):
+        # Calculate new width for video_frame (window width - 433)
+        new_width = self.width() - 360
+        self.video_frame.setMinimumWidth(new_width)
+
+        # Call the parent resize event handler
+        super().resizeEvent(event)
+
     def load_settings_json(self):
-        #Set Default Values
+        # Set default values
         self.hostname_input.setText(f"http://iptv.server.com/c/")
         self.mac_input.setText(f"00:1A:79:12:34:56")
+        
         if os.path.exists(self.settings_file):
             with open(self.settings_file, "r") as f:
-                
                 settings = json.load(f)
                 # Set text inputs from loaded settings
                 self.hostname_input.setText(settings.get("hostname", ""))
                 self.mac_input.setText(settings.get("mac_address", ""))
-  
+                # Set window size and position from loaded settings
+                self.restore_window_settings(settings)
 
-                    
-                    
+    def restore_window_settings(self, settings):
+        # Restore the window geometry and position
+        if "window_geometry" in settings:
+            x, y, width, height = settings["window_geometry"]
+            self.setGeometry(x, y, width, height)
+        
     def save_settings_json(self):
         settings = {
             "hostname": self.hostname_input.text(),
-            "mac_address": self.mac_input.text()
+            "mac_address": self.mac_input.text(),
+            # Save window geometry and position
+            "window_geometry": self.geometry().getRect()  # Get window geometry as (x, y, width, height)
         }
         with open(self.settings_file, "w") as f:
             json.dump(settings, f)
 
     def closeEvent(self, event):
         self.save_settings_json()
-        event.accept()     
-
+        event.accept()
+        
     def set_progress(self, value):
         # Ensure the animation only runs if it's not already running
         if self.progress_animation.state() != QPropertyAnimation.Running:
@@ -573,6 +596,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(pixmap))
 
     def get_playlist(self):
+        self.error_label.hide()  # Hide the error label
         self.playlist_model.clear()
         self.videoPlayer.set_media(self.instance.media_new('https://iptv.evilvir.us/skull.mp4'))  # Load skull
         self.videoPlayer.play()  # Start playing the video
@@ -603,7 +627,6 @@ class MainWindow(QMainWindow):
         
         if self.current_request_thread is not None and self.current_request_thread.isRunning():
             logging.info("Stopping current RequestThread to start a new one.")
-            self.current_request_thread.requestInterruption()
             self.current_request_thread.wait()  # Wait for the thread to finish
 
         # Initialize a new RequestThread for fetching playlist
@@ -626,20 +649,19 @@ class MainWindow(QMainWindow):
 
     def on_initial_playlist_received(self, data):
         if self.current_request_thread != self.sender():
-            logging.debug("Received data from an old thread. Ignoring.")
+            logging.info("Received data from an old thread. Ignoring.")
             return  # Ignore signals from older threads
 
         if not data:
-            self.show_error_message(
-                "Unable to connect to the host."
-            )
-            logging.error("Playlist data is empty.")
+            self.error_label.setText("ERROR: Unable to connect to the host")
+            self.error_label.show()  # Show the error label
+            logging.info("Playlist data is empty.")
             self.current_request_thread = None
             return
         for tab_name, tab_data in data.items():
             tab_info = self.tabs.get(tab_name)
             if not tab_info:
-                logging.warning(f"Unknown tab name: {tab_name}")
+                logging.info(f"Unknown tab name: {tab_name}")
                 continue
             tab_info["playlist_data"] = tab_data
             tab_info["current_category"] = None
@@ -680,7 +702,7 @@ class MainWindow(QMainWindow):
                 logging.info("RequestThread running, stopping it.")
                 self.current_request_thread.requestInterruption()
                 # Connect the finished signal to start a new thread once the old one is done
-                self.current_request_thread.wait()  # Wait for the thread to finish
+                #self.current_request_thread.wait()  # Wait for the thread to finish
                 self.current_request_thread.finished.connect(lambda: self.start_new_thread(tab_name, category_type, category_id))
                 return
 
@@ -689,7 +711,8 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             logging.error(f"Exception in retrieve_channels: {e}")
-            self.show_error_message("An error occurred while retrieving channels.")
+            self.error_label.setText("An error occurred while retrieving channels.")
+            self.error_label.show()  # Show the error label
 
     def start_new_thread(self, tab_name, category_type, category_id):
         self.request_thread = RequestThread(self.base_url, self.mac_address, category_type, category_id)
@@ -744,7 +767,8 @@ class MainWindow(QMainWindow):
                 current_tab = tab_name
                 break
         else:
-            logging.error("Unknown sender for on_playlist_selection_changed")
+            self.error_label.setText("Unknown sender for on_playlist_selection_changed")
+            self.error_label.show()  # Show the error label
             return
 
         tab_info = self.tabs[current_tab]
@@ -840,7 +864,8 @@ class MainWindow(QMainWindow):
                     self.play_channel(item_data)
 
                 else:
-                    logging.error("Unknown item type")
+                    self.error_label.setText("Unknown item type")
+                    self.error_label.show()  # Show the error label
 
     def retrieve_series_info(self, tab_name, context_data, season_number=None):
         tab_info = self.tabs[tab_name]
@@ -853,7 +878,8 @@ class MainWindow(QMainWindow):
             if token:
                 series_id = context_data.get("id")
                 if not series_id:
-                    logging.error(f"Series ID missing in context data: {context_data}")
+                    self.error_label.setText(f"Series ID missing in context data: {context_data}")
+                    self.error_label.show()  # Show the error label
                     return
 
                 cookies = {
@@ -892,18 +918,16 @@ class MainWindow(QMainWindow):
                                     if match:
                                         season_number_extracted = int(match.group(1))
                                     else:
-                                        logging.error(
-                                            f"Unexpected season id format: {season_id}"
-                                        )
+                                        self.error_label.setText(f"Unexpected season id format: {season_id}")
+                                        self.error_label.show()  # Show the error label
                                 else:
                                     match = re.match(r"\d+:(\d+)", season_id)
                                     if match:
                                         season_number_extracted = int(match.group(1))
                                     else:
-                                        logging.error(
-                                            f"Unexpected season id format: {season_id}"
-                                        )
-
+                                        self.error_label.setText(f"Unexpected season id format: {season_id}")
+                                        self.error_label.show()  # Show the error label
+  
                                 season["season_number"] = season_number_extracted
                                 season["item_type"] = "season"
                             all_seasons.extend(seasons_data)
@@ -917,9 +941,9 @@ class MainWindow(QMainWindow):
                                 break
                             page_number += 1
                         else:
-                            logging.error(
-                                f"Failed to fetch seasons for page {page_number} with status code {response.status_code}"
-                            )
+                            self.error_label.setText(f"Failed to fetch seasons for page {page_number} with status code {response.status_code}")
+                            self.error_label.show()  # Show the error label
+  
                             break
 
                     if all_seasons:
@@ -955,7 +979,8 @@ class MainWindow(QMainWindow):
                     else:
                         logging.info("No episodes found.")
             else:
-                logging.error("Failed to retrieve token.")
+                self.error_label.setText("Failed to retrieve token.")
+                self.error_label.show()  # Show the error label
         except KeyError as e:
             logging.error(f"KeyError retrieving series info: {str(e)}")
         except Exception as e:
@@ -994,7 +1019,7 @@ class MainWindow(QMainWindow):
                             "Authorization": f"Bearer {token}",
                         }
                         create_link_url = f"{url}/portal.php?type=itv&action=create_link&cmd={cmd_encoded}&JsHttpRequest=1-xml"
-                        logging.debug(f"Create link URL: {create_link_url}")
+                        logging.info(f"Create link URL: {create_link_url}")
                         response = session.get(
                             create_link_url, cookies=cookies, headers=headers, timeout=10
                         )
@@ -1008,15 +1033,11 @@ class MainWindow(QMainWindow):
                             stream_url = cmd_value
                             self.launch_videoPlayer(stream_url)
                         else:
-                            logging.error("Stream URL not found in the response.")
-                            QMessageBox.critical(
-                                self, "Error", "Stream URL not found in the response."
-                            )
+                            self.error_label.setText("Stream URL not found in the response.")
+                            self.error_label.show()  # Show the error label
                     else:
-                        logging.error("Failed to retrieve token.")
-                        QMessageBox.critical(
-                            self, "Error", "Failed to retrieve token."
-                        )
+                        self.error_label.setText("Failed to retrieve token.")
+                        self.error_label.show()  # Show the error label
                 except Exception as e:
                     logging.error(f"Error creating stream link: {e}")
                     QMessageBox.critical(
@@ -1045,10 +1066,8 @@ class MainWindow(QMainWindow):
                     if item_type == "episode":
                         episode_number = channel.get("episode_number")
                         if episode_number is None:
-                            logging.error("Episode number is missing.")
-                            QMessageBox.critical(
-                                self, "Error", "Episode number is missing."
-                            )
+                            self.error_label.setText("Episode number is missing.")
+                            self.error_label.show()  # Show the error label
                             return
                         create_link_url = f"{url}/portal.php?type=vod&action=create_link&cmd={cmd_encoded}&series={episode_number}&JsHttpRequest=1-xml"
                     else:
@@ -1067,15 +1086,11 @@ class MainWindow(QMainWindow):
                         stream_url = cmd_value
                         self.launch_videoPlayer(stream_url)
                     else:
-                        logging.error("Stream URL not found in the response.")
-                        QMessageBox.critical(
-                            self, "Error", "Stream URL not found in the response."
-                        )
+                        self.error_label.setText("Stream URL not found in the response.")
+                        self.error_label.show()  # Show the error label
                 else:
-                    logging.error("Failed to retrieve token.")
-                    QMessageBox.critical(
-                        self, "Error", "Failed to retrieve token."
-                    )
+                    self.error_label.setText("Failed to retrieve token.")
+                    self.error_label.show()  # Show the error label
             except Exception as e:
                 logging.error(f"Error creating stream link: {e}")
                 QMessageBox.critical(
@@ -1129,8 +1144,6 @@ class MainWindow(QMainWindow):
 
         # Play the new stream
         self.videoPlayer.play()
-        
-        
         
         
         
